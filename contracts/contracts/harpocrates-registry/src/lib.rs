@@ -1026,11 +1026,11 @@ pub enum RegistryError {
     /// The dispute is not in the state this transition requires.
     InvalidDisputeTransition = 67,
     /// Lineage registration supplied zero parents (commitments require ≥1).
-    LineageEmptyParents = 68,
+    LineageEmptyParents = 76,
     /// A lineage parent proof is revoked or expired and cannot anchor a derivative.
-    LineageParentUnavailable = 69,
+    LineageParentUnavailable = 77,
     /// Lineage output digest is already registered.
-    DuplicateLineage = 70,
+    DuplicateLineage = 78,
 }
 
 #[contract]
