@@ -2,6 +2,8 @@
 
 ## 1.0.0 — Unreleased
 
+- Published circuit artifact provenance (`zk/circuit.provenance.json`) with `write-provenance` / `verify-provenance` gates that bind lock-declared circuit sources without compiling ACIR (#376).
+
 - Bound `revocation_witness` Merkle depth at `MAX_REVOCATION_WITNESS_DEPTH = 3` (8 leaves) across the Noir circuit, registry constants, verifier codec, and host tooling (#357).
 
 - Added a CI end-to-end environment matrix (`devx/e2e_env_matrix.py`) that exercises public API boundaries across development/testing/production-like profiles with privacy-safe failure checks.
