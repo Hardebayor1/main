@@ -27,7 +27,10 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from config import load_config
+import register_auth
 from errors import (
+    DEPENDENCY_UNAVAILABLE,
+    FORBIDDEN,
     INTERNAL_ERROR,
     NOT_FOUND,
     PAYLOAD_TOO_LARGE,
@@ -40,6 +43,7 @@ from db import (
     database_url,
     decode_proof_events_cursor,
     find_proof_events_by_video,
+    find_proof_owner,
     find_lineage_by_output_digest,
     find_lineage_by_actor,
     init_db,
@@ -283,49 +287,112 @@ def create_app() -> Flask:
         return response
 
     def require_register_auth(fn):
-        """Decorator that enforces Bearer token auth on proof registration.
+        """Decorator that enforces ownership-scoped auth on proof registration.
 
         Behaviour:
-        - If REGISTER_API_KEY is not configured the endpoint is open (development
-          convenience identical to the previous behaviour).
+        - If neither REGISTER_API_KEY nor REGISTER_SCOPED_KEYS is configured the
+          endpoint is open (development convenience, unchanged).
         - Otherwise the request must carry ``Authorization: Bearer <key>``.
+        - If REGISTER_API_KEY_EXPIRES is set and the current UTC time is at or
+          past that instant the primary and owner-scoped credentials are
+          expired and the request is rejected with 401, even when the token
+          would match.
         - ``REGISTER_API_KEY_PREVIOUS`` can overlap the primary key during a
           rotation.  It is accepted until its optional expiry, allowing
           already-deployed clients to transition without downtime.
+        - The legacy keys are unscoped. An owner-scoped key may only register a
+          ``sourceAddress`` equal to its owner (403 otherwise).
+
+        This must wrap ``@idempotent``: replays are keyed on the request body
+        alone, so authorization and the owner check have to run first or a
+        cached success could be replayed to a caller who may not register it.
         """
+
+        def reject(reason: str, message: str):
+            # Reason codes only; never the token, its digest, or an address.
+            log_structured(
+                LOGGER,
+                logging.WARNING,
+                {"event": "register_auth_rejected", "reason": reason, "request_id": request_id()},
+            )
+            return jsonify({"error": message}), 401
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            if config.register_api_key is None:
-                # No key configured – allow the request (dev mode).
+            legacy_key = config.register_api_key
+            scoped_keys = config.register_scoped_keys
+            if legacy_key is None and not scoped_keys:
+                # No credential configured – allow the request (dev mode).
                 return fn(*args, **kwargs)
 
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
-                return jsonify({"error": "Authorization header with Bearer token is required"}), 401
+                return reject(
+                    register_auth.REASON_MISSING,
+                    "Authorization header with Bearer token is required",
+                )
 
-            provided_key = auth_header[len("Bearer "):].strip()
+            token = auth_header[len("Bearer "):].strip()
             now = datetime.now(tz=timezone.utc)
 
-            # Constant-time comparison is performed for every configured key.
-            # Do not reveal whether a key is primary, previous, or expired.
-            import hmac as _hmac
-
-            candidates = (
-                (config.register_api_key, config.register_api_key_expires),
-                (config.register_api_key_previous, config.register_api_key_previous_expires),
+            # Every configured credential is compared on every call; do not
+            # reveal whether a key is primary, previous, scoped, or expired.
+            principal = register_auth.authenticate(
+                token,
+                legacy_key=legacy_key,
+                scoped_keys=scoped_keys,
             )
-            valid = False
-            for expected_key, expires in candidates:
-                matches = bool(expected_key) and _hmac.compare_digest(provided_key, expected_key)
-                if matches and (expires is None or now < expires):
-                    valid = True
+            previous_key = config.register_api_key_previous
+            previous_principal = (
+                register_auth.authenticate(token, legacy_key=previous_key, scoped_keys=())
+                if previous_key
+                else None
+            )
+            # REGISTER_API_KEY_EXPIRES applies to the primary and scoped keys;
+            # REGISTER_API_KEY_PREVIOUS has its own optional expiry.
+            expires = config.register_api_key_expires
+            primary_expired = expires is not None and now >= expires
+            previous_expires = config.register_api_key_previous_expires
+            if primary_expired:
+                principal = None
+            if principal is None and previous_principal is not None and (
+                previous_expires is None or now < previous_expires
+            ):
+                principal = previous_principal
+            if principal is None:
+                if primary_expired:
+                    return reject(register_auth.REASON_EXPIRED, "API key has expired")
+                return reject(register_auth.REASON_INVALID, "Invalid API key")
 
-            if not valid:
-                if config.register_api_key_expires is not None and now >= config.register_api_key_expires:
-                    return jsonify({"error": "API key has expired"}), 401
-                return jsonify({"error": "Invalid API key"}), 401
+            if principal.is_scoped:
+                # Bound the body we parse before the handler's own size check.
+                if (request.content_length or 0) > config.max_json_bytes:
+                    return jsonify({"error": "JSON payload exceeds size limit"}), 413
+                payload = request.get_json(silent=True)
+                # A non-object body is left for the handler to reject with 400.
+                if isinstance(payload, dict):
+                    try:
+                        claimed_owner = validate_source_address(payload.get("sourceAddress"))
+                    except ValueError as exc:
+                        return jsonify({"error": str(exc)}), 400
+                    if not register_auth.scope_allows(principal, claimed_owner):
+                        log_structured(
+                            LOGGER,
+                            logging.WARNING,
+                            {
+                                "event": "register_auth_rejected",
+                                "reason": register_auth.REASON_SCOPE,
+                                "request_id": request_id(),
+                            },
+                        )
+                        return error_response(
+                            code=FORBIDDEN,
+                            message="credential is not authorized for this sourceAddress",
+                            status=403,
+                            field="sourceAddress",
+                        )
 
+            g.register_principal = principal
             return fn(*args, **kwargs)
 
         return wrapper
@@ -907,6 +974,40 @@ def create_app() -> Flask:
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
+        # Proof ownership: a scoped credential may not register a proof that a
+        # different address already owns. Fail closed if the lookup fails.
+        principal = g.get("register_principal")
+        if principal is not None and principal.is_scoped:
+            try:
+                existing_owner = find_proof_owner(proof_id)
+            except Exception:
+                log_structured(
+                    LOGGER,
+                    logging.ERROR,
+                    {"event": "register_owner_lookup_failed", "request_id": request_id()},
+                )
+                return error_response(
+                    code=DEPENDENCY_UNAVAILABLE,
+                    message="ownership check unavailable; registration was not applied",
+                    status=503,
+                )
+            if existing_owner is not None and existing_owner != validated_source_address:
+                log_structured(
+                    LOGGER,
+                    logging.WARNING,
+                    {
+                        "event": "register_auth_rejected",
+                        "reason": register_auth.REASON_OWNER_CONFLICT,
+                        "request_id": request_id(),
+                    },
+                )
+                return error_response(
+                    code=FORBIDDEN,
+                    message="proof is registered to a different owner",
+                    status=403,
+                    field="proofId",
+                )
+
         # Handle time attestation if provided
         time_attestation_data = None
         claimed_capture_time = None
@@ -919,7 +1020,6 @@ def create_app() -> Flask:
                     return jsonify({"error": "Invalid time attestation", "details": errors}), 400
                 time_attestation_data = encode_time_attestation(time_att)
                 if time_att.claimed_time:
-                    from datetime import datetime, timezone
                     claimed_capture_time = datetime.fromtimestamp(
                         time_att.claimed_time.unix_ms / 1000, tz=timezone.utc
                     ).isoformat()
