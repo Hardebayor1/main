@@ -74,6 +74,13 @@ FORBIDDEN = "FORBIDDEN"
 DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
 """A required backing service failed; the request was rejected, not applied (503)."""
 
+FORBIDDEN_ORIGIN = "FORBIDDEN_ORIGIN"
+"""The request's Origin is not on the configured CORS allow-list (403).
+
+The offending origin value is intentionally absent from the envelope: error
+payloads must stay privacy-safe and must not echo attacker-controlled input.
+"""
+
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
