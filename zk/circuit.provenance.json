@@ -62,6 +62,12 @@
     },
     {
       "kind": "json",
+      "path": "zk/noir/selective_disclosure/target/selective_disclosure.json",
+      "required": true,
+      "role": "acir"
+    },
+    {
+      "kind": "json",
       "path": "frontend/public/noir/silent_witness.json",
       "required": false,
       "role": "published_acir"
@@ -81,6 +87,12 @@
     {
       "kind": "json",
       "path": "frontend/public/noir/silent_witness_aggregator_helper.json",
+      "required": false,
+      "role": "published_acir"
+    },
+    {
+      "kind": "json",
+      "path": "frontend/public/noir/selective_disclosure.json",
       "required": false,
       "role": "published_acir"
     }
@@ -111,7 +123,7 @@
     "zk/noir/silent_witness_aggregator_helper/src/main.nr": "49eba4c6bfe8f5224b268edb319c6e0a7f7dac36fd64ca4b538a13c54def603a",
     "zk/noir/silent_witness_helper/Nargo.toml": "c93524fba9d0ffe9c1079749c4a6c629f0e571a5a1df9f011e984d1f87133d94",
     "zk/noir/silent_witness_helper/src/main.nr": "43b468dbc0655c9bf55b23adcd0a0e24365a85d6f4c693586d31d445356b5c75",
-    "zk/toolchain.lock.json": "fbc834f38c9e87cddc493e4305b5f85135ee7f578f9cdb9c7e7ce50ff714b507"
+    "zk/toolchain.lock.json": "08d3488a62aed60e7c7f5069c9ce2ef65ab0bacaf0e074f3d247aacac0d297a9"
   },
   "provenance_globs": [
     "zk/noir/*/src/*.nr",
